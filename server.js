@@ -103,7 +103,8 @@ wss.on('connection', (ws) => {
       const code = String(msg.code || '').toUpperCase().trim();
       const room = rooms.get(code);
       if (!room) { send(ws, { t: 'error', msg: 'Room not found. Check the code.' }); return; }
-      if (room.started) { send(ws, { t: 'error', msg: 'That game already started.' }); return; }
+      // Pal Strike 2.1: rooms stay joinable after the game started
+      // (drop-in joins). Full rooms still reject.
       if (room.players.size >= MAX_PLAYERS) { send(ws, { t: 'error', msg: 'Room is full (8 players).' }); return; }
       const p = { id: 'p' + Math.random().toString(36).slice(2, 8), name: String(msg.name || 'Player').slice(0, 16) || 'Player', host: false };
       room.players.set(ws, p);
@@ -111,9 +112,28 @@ wss.on('connection', (ws) => {
       ws._room = room;
       send(ws, {
         t: 'joined', code, playerId: p.id, host: false,
+        started: room.started,
         players: [...room.players.values()].map(publicPlayer)
       });
       broadcast(room, { t: 'playerJoined', player: publicPlayer(p) }, ws);
+      return;
+    }
+
+        if (msg.t === 'regenCode') {
+      const room = ws._room;
+      if (!room) return;
+      const p = room.players.get(ws);
+      if (!p || !p.host || ws !== room.host) {
+        send(ws, { t: 'error', msg: 'Only the host can change the room code.' });
+        return;
+      }
+      const oldCode = room.code;
+      let newCode = makeCode();
+      while (newCode === oldCode) { newCode = makeCode(); } // never re-issue the old code
+      rooms.delete(oldCode);
+      room.code = newCode;
+      rooms.set(newCode, room);
+      broadcast(room, { t: 'codeChanged', code: newCode });
       return;
     }
 
