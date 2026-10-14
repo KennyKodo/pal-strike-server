@@ -34,13 +34,13 @@ player state, world snapshots and game events between the players in a room.
   host automatically ("You are now host") and the game continues.
 - Rooms are in-memory only: restarting the server clears all rooms (players
   just create a new room). No scores or names are stored on the server.
+- **Pal Strike 2.1:** rooms stay joinable after the game started (drop-in joins; the join reply carries `started: true`). The host — and ONLY the host — can regenerate the room code (`regenCode` message): the server broadcasts `codeChanged` to the room and the old code stops working immediately. Non-host refresh attempts get an error. The code otherwise NEVER changes: not on joins, leaves, game start, or host migration (the new host inherits the same code).
 
 ## Protocol (for reference)
 
 JSON over WebSocket. Client → server: `create`, `join`, `start`, `leave`,
 `player` (own state ~15Hz), `snap` (host world snapshot ~10Hz, host only),
-`ev` (game events). Server → clients: `created`, `joined`, `playerJoined`,
-`playerLeft`, `hostChange`, `gameStart`, `error`, plus relayed `player` /
+`ev` (game events), `regenCode` (host-only room-code refresh). Server → clients: `created`, `joined`, `playerJoined`, `codeChanged`, `playerLeft`, `hostChange`, `gameStart`, `error`, plus relayed `player` /
 `snap` / `ev` messages (never echoed back to the sender).
 
 Run locally: `npm install && node server.js` (listens on `PORT`, default 3000;
