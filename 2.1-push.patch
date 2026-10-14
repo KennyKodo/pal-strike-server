@@ -1,0 +1,85 @@
+From 5a11daee2551fece7e379f7fc0b46e7a6a4b3024 Mon Sep 17 00:00:00 2001
+From: KennyKodo <kennykodo@gmail.com>
+Date: Tue, 13 Oct 2026 23:46:40 +0000
+Subject: [PATCH] 2.1: drop-in joins + host-only room code regen
+
+---
+ README.md | 10 +++++++++-
+ server.js | 22 +++++++++++++++++++++-
+ 2 files changed, 30 insertions(+), 2 deletions(-)
+
+diff --git a/README.md b/README.md
+index b1a6f12..cf71a60 100644
+--- a/README.md
++++ b/README.md
+@@ -34,12 +34,20 @@ player state, world snapshots and game events between the players in a room.
+   host automatically ("You are now host") and the game continues.
+ - Rooms are in-memory only: restarting the server clears all rooms (players
+   just create a new room). No scores or names are stored on the server.
++- **Pal Strike 2.1:** rooms stay joinable after the game started
++  (drop-in joins; the join reply carries `started: true`). The host —
++  and ONLY the host — can regenerate the room code (`regenCode`
++  message): the server broadcasts `codeChanged` to the room and the old
++  code stops working immediately. Non-host refresh attempts get an
++  error. The code otherwise NEVER changes: not on joins, leaves, game
++  start, or host migration (the new host inherits the same code).
+ 
+ ## Protocol (for reference)
+ 
+ JSON over WebSocket. Client → server: `create`, `join`, `start`, `leave`,
+ `player` (own state ~15Hz), `snap` (host world snapshot ~10Hz, host only),
+-`ev` (game events). Server → clients: `created`, `joined`, `playerJoined`,
++`ev` (game events), `regenCode` (host-only room-code refresh).
++Server → clients: `created`, `joined`, `playerJoined`, `codeChanged`,
+ `playerLeft`, `hostChange`, `gameStart`, `error`, plus relayed `player` /
+ `snap` / `ev` messages (never echoed back to the sender).
+ 
+diff --git a/server.js b/server.js
+index 853136c..51a7a35 100644
+--- a/server.js
++++ b/server.js
+@@ -103,7 +103,8 @@ wss.on('connection', (ws) => {
+       const code = String(msg.code || '').toUpperCase().trim();
+       const room = rooms.get(code);
+       if (!room) { send(ws, { t: 'error', msg: 'Room not found. Check the code.' }); return; }
+-      if (room.started) { send(ws, { t: 'error', msg: 'That game already started.' }); return; }
++      // Pal Strike 2.1: rooms stay joinable after the game started
++      // (drop-in joins). Full rooms still reject.
+       if (room.players.size >= MAX_PLAYERS) { send(ws, { t: 'error', msg: 'Room is full (8 players).' }); return; }
+       const p = { id: 'p' + Math.random().toString(36).slice(2, 8), name: String(msg.name || 'Player').slice(0, 16) || 'Player', host: false };
+       room.players.set(ws, p);
+@@ -111,12 +112,31 @@ wss.on('connection', (ws) => {
+       ws._room = room;
+       send(ws, {
+         t: 'joined', code, playerId: p.id, host: false,
++        started: room.started,
+         players: [...room.players.values()].map(publicPlayer)
+       });
+       broadcast(room, { t: 'playerJoined', player: publicPlayer(p) }, ws);
+       return;
+     }
+ 
++    if (msg.t === 'regenCode') {
++      const room = ws._room;
++      if (!room) return;
++      const p = room.players.get(ws);
++      if (!p || !p.host || ws !== room.host) {
++        send(ws, { t: 'error', msg: 'Only the host can change the room code.' });
++        return;
++      }
++      const oldCode = room.code;
++      let newCode = makeCode();
++      while (newCode === oldCode) { newCode = makeCode(); } // never re-issue the old code
++      rooms.delete(oldCode);
++      room.code = newCode;
++      rooms.set(newCode, room);
++      broadcast(room, { t: 'codeChanged', code: newCode });
++      return;
++    }
++
+     const room = ws._room;
+     if (!room) return;
+ 
+-- 
+2.43.0
+

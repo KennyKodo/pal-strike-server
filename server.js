@@ -16,7 +16,8 @@ const WebSocket = require('ws');
 const MAX_PLAYERS = 8;
 const CODE_CHARS = 'ABCDEFGHJKLMNPQRSTUVWXYZ'; // no I / O (confusable)
 
-const rooms = new Map(); // code -> { code, players: Map<ws, player>, order: [ws], host: ws, started: bool, createdAt }
+const rooms = new Map(); // code -> { id, code, players: Map<ws, player>, order: [ws], host: ws, started: bool, wave: number, createdAt }
+const roomsById = new Map(); // room id -> room (2.5 lobby browser)
 
 function makeCode() {
   let code = '';
@@ -25,6 +26,26 @@ function makeCode() {
 }
 
 function publicPlayer(p) { return { id: p.id, name: p.name, host: p.host }; }
+
+// 2.5: public lobby listing — no codes, no private data. The host's name,
+// player count, started state, and current wave (tracked from host
+// snapshots) are all a joining player needs to pick a lobby.
+function publicRoom(room) {
+  const host = room.players.get(room.host);
+  return {
+    id: room.id,
+    hostName: host ? host.name : 'Host',
+    players: room.players.size,
+    started: room.started,
+    wave: room.wave || 0
+  };
+}
+
+function makeRoomId() {
+  let id = '';
+  for (let i = 0; i < 8; i++) id += CODE_CHARS[Math.floor(Math.random() * CODE_CHARS.length)];
+  return roomsById.has(id) ? makeRoomId() : id;
+}
 
 function broadcast(room, msg, exceptWs) {
   const data = JSON.stringify(msg);
@@ -40,6 +61,7 @@ function send(ws, msg) {
 function cleanupRoom(room) {
   if (room.players.size === 0) {
     rooms.delete(room.code);
+    roomsById.delete(room.id);
     return;
   }
   // Host migration: promote the next-joined player.
@@ -88,20 +110,22 @@ wss.on('connection', (ws) => {
     if (msg.t === 'create') {
       if (ws._room) return;
       const code = makeCode();
-      const room = { code, players: new Map(), order: [], host: ws, started: false, createdAt: Date.now() };
+      const room = { id: makeRoomId(), code, players: new Map(), order: [], host: ws, started: false, wave: 0, createdAt: Date.now() };
       rooms.set(code, room);
+      roomsById.set(room.id, room);
       const p = { id: 'p' + Math.random().toString(36).slice(2, 8), name: String(msg.name || 'Player').slice(0, 16) || 'Player', host: true };
       room.players.set(ws, p);
       room.order.push(ws);
       ws._room = room;
-      send(ws, { t: 'created', code, playerId: p.id, host: true });
+      send(ws, { t: 'created', code, roomId: room.id, playerId: p.id, host: true });
       return;
     }
 
     if (msg.t === 'join') {
       if (ws._room) return;
-      const code = String(msg.code || '').toUpperCase().trim();
-      const room = rooms.get(code);
+      // 2.5: join by lobby room id; older versions still join by code.
+      const room = msg.roomId ? roomsById.get(String(msg.roomId)) : rooms.get(String(msg.code || '').toUpperCase().trim());
+      const code = room ? room.code : String(msg.code || '').toUpperCase().trim();
       if (!room) { send(ws, { t: 'error', msg: 'Room not found. Check the code.' }); return; }
       // Pal Strike 2.1: rooms stay joinable after the game started
       // (drop-in joins). Full rooms still reject.
@@ -111,7 +135,7 @@ wss.on('connection', (ws) => {
       room.order.push(ws);
       ws._room = room;
       send(ws, {
-        t: 'joined', code, playerId: p.id, host: false,
+        t: 'joined', code, roomId: room.id, playerId: p.id, host: false,
         started: room.started,
         players: [...room.players.values()].map(publicPlayer)
       });
@@ -119,7 +143,13 @@ wss.on('connection', (ws) => {
       return;
     }
 
-        if (msg.t === 'regenCode') {
+    // 2.5: public lobby list — every open room, no code needed to browse.
+    if (msg.t === 'listLobbies') {
+      send(ws, { t: 'lobbies', lobbies: [...rooms.values()].map(publicRoom) });
+      return;
+    }
+
+    if (msg.t === 'regenCode') {
       const room = ws._room;
       if (!room) return;
       const p = room.players.get(ws);
@@ -133,6 +163,7 @@ wss.on('connection', (ws) => {
       rooms.delete(oldCode);
       room.code = newCode;
       rooms.set(newCode, room);
+      // The room id never changes on a code refresh (2.5 lobby joins keep working).
       broadcast(room, { t: 'codeChanged', code: newCode });
       return;
     }
@@ -143,7 +174,7 @@ wss.on('connection', (ws) => {
     if (msg.t === 'start') {
       if (ws !== room.host || room.started) return;
       room.started = true;
-      broadcast(room, { t: 'gameStart', players: [...room.players.values()].map(publicPlayer) });
+      broadcast(room, { t: 'gameStart', roomId: room.id, players: [...room.players.values()].map(publicPlayer) });
       return;
     }
 
@@ -153,6 +184,8 @@ wss.on('connection', (ws) => {
     // Snapshots are only forwarded from the current host (a stale host's
     // snapshots must never overwrite the new host's world).
     if (msg.t === 'snap' && ws !== room.host) return;
+    // 2.5: track the room's current wave from host snapshots for the lobby list.
+    if (msg.t === 'snap' && ws === room.host && typeof msg.wave === 'number') { room.wave = msg.wave; }
     if (msg.t === 'player' || msg.t === 'snap' || msg.t === 'ev') {
       broadcast(room, msg, ws);
       return;
